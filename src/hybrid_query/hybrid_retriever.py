@@ -81,18 +81,25 @@ class HybridRetriever:
                     # skip on any graph errors
                     continue
 
-        # 4. Combine & score
+        # 4. Combine & score with improved ranking
         combined: List[Dict[str, Any]] = []
+        query_words = set(query_text.lower().split())  # Extract query keywords
+        
         for res in vector_results:
             vec_score = res.get("score", 0.0)
             metadata = res.get("metadata", {})
             payload = res.get("payload", {})
+            text = res.get("text", "").lower()
+            
+            # Quality filter: Skip very short or very low-scoring results
+            if len(text.strip()) < 30 or vec_score < 0.2:
+                continue
             
             # Get entity_ids from either metadata or payload
             eids = metadata.get("entity_ids") or payload.get("entity_ids", [])
             if not isinstance(eids, list):
                 eids = []
-
+            
             # Graph score: count how many related entities appear in graph_contexts
             graph_score = 0
             related_entities = []
@@ -100,17 +107,106 @@ class HybridRetriever:
                 if ctx.get("source_id") in eids or ctx.get("related_id") in eids:
                     graph_score += 1
                     related_entities.append(ctx)
-
-            total_score = vec_score + graph_score  # simple additive ranking
+            
+            # Query keyword boost: Boost score if query keywords appear in text
+            keyword_boost = 0.0
+            if query_words:
+                matching_keywords = sum(1 for word in query_words if word in text)
+                keyword_boost = (matching_keywords / len(query_words)) * 0.2  # Max 0.2 boost
+            
+            # Improved scoring: Weighted combination with keyword boost
+            # Vector similarity is most important (0.7), graph adds context (0.2), keywords add precision (0.1)
+            weighted_vec = vec_score * 0.7
+            weighted_graph = min(graph_score * 0.15, 0.2)  # Cap graph contribution
+            weighted_keywords = keyword_boost * 0.1
+            
+            total_score = weighted_vec + weighted_graph + weighted_keywords
 
             combined.append({
                 "vector_result": res,
                 "graph_relations": related_entities,
                 "vector_score": vec_score,
                 "graph_score": graph_score,
+                "keyword_boost": keyword_boost,
                 "total_score": total_score
             })
 
-        # 5. Sort by total_score descending and return top_k_final
-        combined_sorted = sorted(combined, key=lambda x: x["total_score"], reverse=True)
-        return combined_sorted[: self.top_k_final]
+        # 5. Deduplicate results - aggressive deduplication to ensure no duplicates
+        seen_ids = set()  # For result IDs
+        seen_paragraphs = set()  # For doc_id + paragraph_id combinations
+        seen_texts = set()  # For normalized text content
+        seen_docs = set()  # Track documents to ensure diversity
+        deduplicated = []
+        
+        for res in combined:
+            doc = res["vector_result"]
+            
+            # Get all identifiers
+            result_id = doc.get("id", "")
+            doc_id = doc.get("doc_id", "")
+            paragraph_id = doc.get("paragraph_id", "")
+            text = doc.get("text", "").strip()
+            
+            # Normalize text for comparison (remove extra whitespace, lowercase for comparison)
+            text_normalized = " ".join(text.split()).lower() if text else ""
+            
+            # Check 1: Result ID (most reliable if present)
+            if result_id:
+                if result_id in seen_ids:
+                    continue
+                seen_ids.add(result_id)
+            
+            # Check 2: Document + Paragraph combination (very reliable)
+            if doc_id and paragraph_id:
+                para_key = f"{doc_id}||{paragraph_id}"
+                if para_key in seen_paragraphs:
+                    continue
+                seen_paragraphs.add(para_key)
+            
+            # Check 3: Exact text match (catches duplicates even if IDs differ)
+            # Use a hash of first 100 chars + length for faster comparison
+            if text_normalized and len(text_normalized) > 5:
+                # Create a text signature: first 100 chars + total length
+                text_sig = f"{text_normalized[:100]}_{len(text_normalized)}"
+                if text_sig in seen_texts:
+                    # Also check full text match for certainty
+                    if text_normalized in seen_texts:
+                        continue
+                seen_texts.add(text_normalized)
+                seen_texts.add(text_sig)
+            
+            # Track document for diversity (optional - can be removed if you want same doc multiple times)
+            # This ensures we get results from different documents when possible
+            if doc_id:
+                seen_docs.add(doc_id)
+            
+            deduplicated.append(res)
+        
+        # 6. Sort by total_score descending
+        combined_sorted = sorted(deduplicated, key=lambda x: x["total_score"], reverse=True)
+        
+        # 7. Apply diversity filter: Prefer results from different documents
+        # This ensures we get diverse perspectives when possible
+        final_results = []
+        seen_doc_ids = set()
+        
+        for res in combined_sorted:
+            if len(final_results) >= self.top_k_final:
+                break
+            
+            doc = res["vector_result"]
+            doc_id = doc.get("doc_id", "")
+            
+            # If we already have a result from this document and we have multiple results,
+            # skip unless this result has a significantly higher score
+            if doc_id in seen_doc_ids and len(final_results) > 0:
+                # Only add if score is much better (at least 0.1 higher) than existing results
+                if final_results and res["total_score"] > final_results[-1]["total_score"] + 0.1:
+                    final_results.append(res)
+                    seen_doc_ids.add(doc_id)
+            else:
+                final_results.append(res)
+                if doc_id:
+                    seen_doc_ids.add(doc_id)
+        
+        return final_results[: self.top_k_final]

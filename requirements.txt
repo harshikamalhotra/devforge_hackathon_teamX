@@ -2,3 +2,6 @@ docling
 gqlalchemy
 sentence-transformers
 numpy
+beautifulsoup4
+requests
+markdown

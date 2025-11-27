@@ -1,0 +1,32 @@
+## About
+Experienced software engineer with 10+ years in full-stack development. Passionate about building scalable applications and leading engineering teams. Specialized in Python, JavaScript, and cloud technologies.
+## Experience
+
+Senior Software Engineer Tech Corp Jan 2020 - Present · 4 years Leading development of microservices architecture. Implemented CI/CD pipelines reducing deployment time by 60%. Mentored junior developers and conducted code reviews.
+Software Engineer StartupXYZ Jun 2015 - Dec 2019 · 4 years 7 months Developed RESTful APIs and frontend applications. Worked with React, Node.js, and PostgreSQL. Collaborated with cross-functional teams on product features.
+### Senior Software Engineer
+
+Jan 2020 - Present · 4 years
+Leading development of microservices architecture. Implemented CI/CD pipelines reducing deployment time by 60%. Mentored junior developers and conducted code reviews.
+### Software Engineer
+
+Jun 2015 - Dec 2019 · 4 years 7 months
+Developed RESTful APIs and frontend applications. Worked with React, Node.js, and PostgreSQL. Collaborated with cross-functional teams on product features.
+## Education
+
+Bachelor of Science in Computer Science University of California, Berkeley 2011 - 2015
+### Bachelor of Science in Computer Science
+
+University of California, Berkeley
+2011 - 2015
+## Skills
+
+## Recommendations
+"John is an exceptional engineer with deep technical expertise. He consistently delivers high-quality code and is a great team player." - Jane Smith, Engineering Manager
+- Python
+- JavaScript
+- React
+- Node.js
+- Docker
+- Kubernetes
+- Jane Smith, Engineering Manager
