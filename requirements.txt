@@ -1,2 +1,4 @@
 docling
 gqlalchemy
+sentence-transformers
+numpy

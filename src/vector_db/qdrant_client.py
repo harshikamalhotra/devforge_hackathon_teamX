@@ -98,3 +98,110 @@ class LocalVectorDB:
         self.ids = []
         self.payloads = {}
         self._save()
+
+    # -------------------- CRUD Compatibility Methods --------------------
+    
+    def add_document(self, doc_id: str, content: Dict[str, Any]):
+        """
+        Add a single document with its content.
+        This is a convenience method that extracts paragraphs and creates embeddings.
+        Note: This method expects content to already have embeddings in paragraphs.
+        For better control, use upsert_documents directly.
+        """
+        # Extract paragraphs with embeddings
+        paragraphs = content.get("paragraphs", [])
+        if not paragraphs:
+            return
+        
+        ids = []
+        embeddings = []
+        metadatas = []
+        
+        for para in paragraphs:
+            para_id = f"{doc_id}_{para.get('id', len(ids))}"
+            ids.append(para_id)
+            
+            # Get embedding from paragraph (should be added by caller)
+            embedding = para.get("embedding")
+            if embedding is None:
+                raise ValueError(f"Paragraph {para_id} missing embedding. Call embedder first.")
+            
+            embeddings.append(embedding)
+            
+            # Create metadata
+            metadata = {
+                "doc_id": doc_id,
+                "paragraph_id": para.get("id"),
+                "text": para.get("text", ""),
+                "source": content.get("source", doc_id),
+                "type": content.get("type", ""),
+                "metadata": content.get("metadata", {})
+            }
+            metadatas.append(metadata)
+        
+        self.upsert_documents(ids=ids, embeddings=embeddings, metadatas=metadatas)
+
+    def get_document(self, doc_id: str) -> Dict[str, Any]:
+        """
+        Retrieve all paragraphs for a document by doc_id.
+        Returns the document structure with all its paragraphs.
+        """
+        # Find all paragraphs for this document
+        doc_paragraphs = []
+        doc_metadata = None
+        
+        for stored_id in self.ids:
+            payload = self.payloads.get(stored_id, {})
+            if payload.get("doc_id") == doc_id:
+                doc_paragraphs.append({
+                    "id": payload.get("paragraph_id", ""),
+                    "text": payload.get("text", "")
+                })
+                if doc_metadata is None:
+                    doc_metadata = payload.get("metadata", {})
+        
+        if not doc_paragraphs:
+            return {}
+        
+        return {
+            "source": doc_id,
+            "metadata": doc_metadata or {},
+            "paragraphs": doc_paragraphs
+        }
+
+    def delete_document(self, doc_id: str):
+        """
+        Delete all paragraphs for a document by doc_id.
+        """
+        # Find all IDs for this document
+        ids_to_delete = [
+            stored_id for stored_id in self.ids
+            if self.payloads.get(stored_id, {}).get("doc_id") == doc_id
+        ]
+        
+        if ids_to_delete:
+            self.delete(ids_to_delete)
+
+    def similarity_search(self, query_vector: List[float], top_k: int = 5) -> List[Dict[str, Any]]:
+        """
+        Alias for search_vector for CRUD compatibility.
+        Returns results with 'text' field for easier access.
+        """
+        results = self.search_vector(query_vector, top_k=top_k)
+        
+        # Transform results to include text directly
+        transformed = []
+        for res in results:
+            payload = res.get("payload", {})
+            # Include all payload fields in metadata for easy access
+            transformed.append({
+                "id": res.get("id"),
+                "score": res.get("score"),
+                "text": payload.get("text", ""),
+                "doc_id": payload.get("doc_id", ""),
+                "paragraph_id": payload.get("paragraph_id", ""),
+                "metadata": payload,  # Return entire payload as metadata for compatibility
+                "payload": payload  # Also keep payload for direct access
+            })
+        
+        return transformed
