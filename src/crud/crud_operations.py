@@ -46,9 +46,20 @@ class CRUDOperations:
 
         # Store entities in graph DB (if available)
         if self.graph_db_available and self.graph_db:
-            for entity in doc_json.get("entities", []):
-                self.graph_db.create_entity_node(entity_id=entity["id"], label=entity.get("label", "Entity"),
-                                                 metadata=entity.get("metadata", {}))
+            try:
+                for entity in doc_json.get("entities", []):
+                    try:
+                        self.graph_db.create_entity_node(
+                            entity_id=entity["id"], 
+                            label=entity.get("label", "Entity"),
+                            metadata=entity.get("metadata", {})
+                        )
+                    except Exception as e:
+                        # Skip duplicate entities or errors
+                        continue
+            except Exception as e:
+                # Log but don't fail if graph storage fails
+                pass
 
             # Optionally, store relationships if any
             for rel in doc_json.get("relationships", []):

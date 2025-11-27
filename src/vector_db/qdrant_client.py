@@ -128,14 +128,16 @@ class LocalVectorDB:
             
             embeddings.append(embedding)
             
-            # Create metadata
+            # Create metadata - include entity_ids from paragraph if available
+            entity_ids = para.get("entity_ids", [])
             metadata = {
                 "doc_id": doc_id,
                 "paragraph_id": para.get("id"),
                 "text": para.get("text", ""),
                 "source": content.get("source", doc_id),
                 "type": content.get("type", ""),
-                "metadata": content.get("metadata", {})
+                "metadata": content.get("metadata", {}),
+                "entity_ids": entity_ids  # Store entity IDs for graph retrieval
             }
             metadatas.append(metadata)
         
