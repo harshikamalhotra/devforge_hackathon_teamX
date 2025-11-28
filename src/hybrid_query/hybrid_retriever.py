@@ -1,15 +1,16 @@
 """
 Hybrid Retriever combining vector similarity + graph relational retrieval.
 
-Based on GraphRAG / HybridRAG architecture:
+Based on GraphRAG / HybridRAG architecture and test case requirements:
 1. Use vector embeddings to find top-k semantically relevant chunks/documents.
 2. Identify entities from those documents.
-3. Use graph DB (Cypher) to expand context via relationships.
-4. Merge vector + graph results, score & re-rank.
+3. Use graph DB (Cypher) to expand context via relationships with hop distance.
+4. Merge vector + graph results using: final_score = vector_weight * vector_score + graph_weight * graph_score
+5. Graph score formula: graph_score = 1 / (1 + hops) where hop=0 → 1.0, hop=1 → 0.5, hop=2 → 0.3333
 """
 
 import re
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, Optional
 from src.embedding.embedder import Embedder
 from src.vector_db.qdrant_client import LocalVectorDB  # or your custom client
 from src.graph_db.memgraph_client import MemgraphClient     # using gqlalchemy or other client
@@ -18,8 +19,10 @@ from src.utils.config import EMBEDDING_MODEL_NAME
 class HybridRetriever:
     def __init__(
         self,
-        top_k_vectors: int = 5,
-        top_k_final: int = 5
+        top_k_vectors: int = 10,
+        top_k_final: int = 5,
+        vector_weight: float = 0.6,
+        graph_weight: float = 0.4
     ):
         self.embedder = Embedder(model_name=EMBEDDING_MODEL_NAME)
         self.vector_db = LocalVectorDB()
@@ -34,212 +37,248 @@ class HybridRetriever:
         
         self.top_k_vectors = top_k_vectors
         self.top_k_final = top_k_final
+        self.vector_weight = vector_weight
+        self.graph_weight = graph_weight
+        
+        # Validate weights sum to 1.0 (or allow flexibility)
+        if abs(vector_weight + graph_weight - 1.0) > 0.01:
+            # Normalize weights if they don't sum to 1.0
+            total = vector_weight + graph_weight
+            self.vector_weight = vector_weight / total
+            self.graph_weight = graph_weight / total
 
-    def retrieve(self, query_text: str) -> List[Dict[str, Any]]:
+    def retrieve(
+        self, 
+        query_text: str,
+        vector_weight: Optional[float] = None,
+        graph_weight: Optional[float] = None
+    ) -> List[Dict[str, Any]]:
         """
         Perform hybrid retrieval for a query. Returns list of results with combined scores.
         Each result includes:
           - vector result (text chunk, metadata, vector_score)
           - optionally related graph context (entities / relationships)
-          - total_score (vector_score + graph_score)
+          - vector_score, graph_score, final_score
+          - final_score = vector_weight * vector_score + graph_weight * graph_score
+        
+        Args:
+            query_text: Query string
+            vector_weight: Override default vector_weight for this query (default: self.vector_weight)
+            graph_weight: Override default graph_weight for this query (default: self.graph_weight)
         """
+        # Use provided weights or defaults
+        v_weight = vector_weight if vector_weight is not None else self.vector_weight
+        g_weight = graph_weight if graph_weight is not None else self.graph_weight
+        
+        # Normalize weights if needed
+        if abs(v_weight + g_weight - 1.0) > 0.01:
+            total = v_weight + g_weight
+            v_weight = v_weight / total
+            g_weight = g_weight / total
+        
         # 1. Vector semantic search
         query_emb = self.embedder.encode_text(query_text)
         vector_results = self.vector_db.similarity_search(query_emb, top_k=self.top_k_vectors)
 
-        # If no graph DB or no entities, just return vector results
+        # If no results, return empty
         if not vector_results:
             return []
 
         # 2. Collect entity IDs from vector result payloads
         entity_ids = set()
         for res in vector_results:
-            # similarity_search returns results with 'metadata' field containing the payload
-            # Check metadata first (which contains the payload data)
             metadata = res.get("metadata", {})
-            
-            # Also check if there's a direct payload field
             payload = res.get("payload", {})
-            
-            # Try to get entity_ids from metadata or payload
             eids = metadata.get("entity_ids") or payload.get("entity_ids")
             if isinstance(eids, list) and len(eids) > 0:
                 entity_ids.update(eids)
 
-        # 3. Graph-based expansion: fetch related entities/contexts
-        graph_contexts = []
-        if self.graph_db_available and self.graph_db and entity_ids:
-            for eid in entity_ids:
-                # Basic 1-hop neighborhood query — modify as needed for deeper traversal
-                cypher = (
-                    f"MATCH (n {{id: '{eid}'}})-[r]-(m) "
-                    "RETURN n.id AS source_id, type(r) AS rel_type, m.id AS related_id"
-                )
-                try:
-                    rels = self.graph_db.run_query(cypher)
-                    graph_contexts.extend(rels)
-                except Exception as e:
-                    # skip on any graph errors
+        # 3. Graph-based expansion: compute hop distances from query-relevant entities
+        # Find the most relevant entity (from top vector result) as anchor for graph proximity
+        anchor_entity_ids = set()
+        if vector_results and entity_ids:
+            # Use entities from top vector results as anchors
+            top_result = vector_results[0]
+            top_metadata = top_result.get("metadata", {})
+            top_payload = top_result.get("payload", {})
+            top_eids = top_metadata.get("entity_ids") or top_payload.get("entity_ids", [])
+            if isinstance(top_eids, list) and len(top_eids) > 0:
+                anchor_entity_ids.update(top_eids[:3])  # Use top 3 entities as anchors
+        
+        # Compute graph proximity scores (hop distances) for each result
+        graph_proximity_map = {}  # Maps result identifier -> (min_hop, graph_score)
+        
+        if self.graph_db_available and self.graph_db and anchor_entity_ids:
+            # For each result, find minimum hop distance to anchor entities
+            for res in vector_results:
+                result_id = res.get("id", "")
+                metadata = res.get("metadata", {})
+                payload = res.get("payload", {})
+                result_eids = metadata.get("entity_ids") or payload.get("entity_ids", [])
+                
+                if not isinstance(result_eids, list) or len(result_eids) == 0:
+                    # No entities in this result, graph_score = 0.0
+                    graph_proximity_map[result_id] = (float('inf'), 0.0)
                     continue
+                
+                # Find minimum hop distance from result entities to anchor entities
+                min_hop = float('inf')
+                
+                for result_eid in result_eids:
+                    for anchor_eid in anchor_entity_ids:
+                        if result_eid == anchor_eid:
+                            # Same entity, hop = 0
+                            min_hop = 0
+                            break
+                        else:
+                            # Find shortest path between entities
+                            hop = self._find_shortest_hop(result_eid, anchor_eid)
+                            if hop is not None and hop < min_hop:
+                                min_hop = hop
+                    
+                    if min_hop == 0:
+                        break  # Can't get better than 0
+                
+                # Calculate graph score: graph_score = 1 / (1 + hops)
+                if min_hop == float('inf'):
+                    graph_score = 0.0
+                else:
+                    graph_score = 1.0 / (1.0 + min_hop)
+                
+                graph_proximity_map[result_id] = (min_hop if min_hop != float('inf') else None, graph_score)
+        else:
+            # No graph DB or no entities, set all graph scores to 0
+            for res in vector_results:
+                result_id = res.get("id", "")
+                graph_proximity_map[result_id] = (None, 0.0)
 
-        # 4. Combine & score with improved ranking
+        # 4. Combine & score using test case formula: final_score = vector_weight * vector_score + graph_weight * graph_score
         combined: List[Dict[str, Any]] = []
-        query_words = set(query_text.lower().split())  # Extract query keywords
         
         for res in vector_results:
+            result_id = res.get("id", "")
             vec_score = res.get("score", 0.0)
             metadata = res.get("metadata", {})
             payload = res.get("payload", {})
-            text = res.get("text", "").lower()
-            text_original = res.get("text", "")  # Keep original for quality checks
+            text_original = res.get("text", "")
             
             # Quality filter: Skip very short or very low-scoring results
-            if len(text.strip()) < 30 or vec_score < 0.2:
+            if len(text_original.strip()) < 10 or vec_score < 0.1:
                 continue
             
-            # Filter out contact information patterns (phone, email, URL only)
-            # This helps avoid returning just contact info when searching for profile content
-            contact_pattern = r'^[\+\d\s\-\(\)]+[\s|]*[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}[\s|]*https?://[^\s]+$'
-            if re.match(contact_pattern, text_original.strip()):
-                # Skip if it's just contact info (phone | email | URL)
-                continue
+            # Get graph score from proximity map
+            hop_info, graph_score = graph_proximity_map.get(result_id, (None, 0.0))
             
-            # Penalize results that are mostly contact info
-            contact_info_score = 0.0
-            if re.search(r'[\+\d\s\-\(\)]{10,}', text_original):  # Phone number pattern
-                contact_info_score += 0.3
-            if re.search(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', text_original):  # Email
-                contact_info_score += 0.3
-            if re.search(r'https?://[^\s]+', text_original):  # URL
-                contact_info_score += 0.2
+            # Calculate final score using test case formula
+            final_score = v_weight * vec_score + g_weight * graph_score
             
-            # If result is mostly contact info (score > 0.5), reduce its relevance
-            contact_penalty = max(0, (contact_info_score - 0.3) * 0.3) if contact_info_score > 0.5 else 0
-            
-            # Get entity_ids from either metadata or payload
-            eids = metadata.get("entity_ids") or payload.get("entity_ids", [])
-            if not isinstance(eids, list):
-                eids = []
-            
-            # Graph score: count how many related entities appear in graph_contexts
-            graph_score = 0
-            related_entities = []
-            for ctx in graph_contexts:
-                if ctx.get("source_id") in eids or ctx.get("related_id") in eids:
-                    graph_score += 1
-                    related_entities.append(ctx)
-            
-            # Query keyword boost: Boost score if query keywords appear in text
-            # Improved: Check for exact matches and also check if query words appear as whole words
-            keyword_boost = 0.0
-            if query_words:
-                matching_keywords = 0
-                for word in query_words:
-                    # Check for whole word matches (better than substring matches)
-                    if re.search(r'\b' + re.escape(word) + r'\b', text):
-                        matching_keywords += 1
-                    elif word in text:
-                        matching_keywords += 0.5  # Partial match gets half credit
-                
-                keyword_boost = (matching_keywords / len(query_words)) * 0.3  # Increased max boost to 0.3
-            
-            # Content quality boost: Prefer longer, more substantial content
-            content_quality = min(len(text.strip()) / 500, 0.15)  # Boost up to 0.15 for longer content
-            
-            # Improved scoring: Weighted combination with keyword boost and content quality
-            # Vector similarity is most important (0.6), keywords add precision (0.2), content quality (0.1), graph adds context (0.1)
-            weighted_vec = vec_score * 0.6
-            weighted_keywords = keyword_boost * 0.2
-            weighted_content = content_quality * 0.1
-            weighted_graph = min(graph_score * 0.1, 0.1)  # Reduced graph contribution
-            
-            total_score = weighted_vec + weighted_keywords + weighted_content + weighted_graph - contact_penalty
+            # Get graph relations for display (if available)
+            graph_relations = []
+            if self.graph_db_available and self.graph_db:
+                result_eids = metadata.get("entity_ids") or payload.get("entity_ids", [])
+                if isinstance(result_eids, list) and len(result_eids) > 0:
+                    # Get relationships for entities in this result
+                    for eid in result_eids[:3]:  # Limit to first 3 entities
+                        try:
+                            cypher = (
+                                f"MATCH (n {{id: '{eid}'}})-[r]-(m) "
+                                "RETURN n.id AS source_id, type(r) AS rel_type, m.id AS related_id, r.weight AS weight"
+                            )
+                            rels = self.graph_db.run_query(cypher)
+                            graph_relations.extend(rels)
+                        except Exception:
+                            continue
 
             combined.append({
                 "vector_result": res,
-                "graph_relations": related_entities,
+                "graph_relations": graph_relations,
                 "vector_score": vec_score,
                 "graph_score": graph_score,
-                "keyword_boost": keyword_boost,
-                "total_score": total_score
+                "final_score": final_score,
+                "hop": hop_info,
+                "vector_weight": v_weight,
+                "graph_weight": g_weight
             })
 
-        # 5. Deduplicate results - aggressive deduplication to ensure no duplicates
-        seen_ids = set()  # For result IDs
-        seen_paragraphs = set()  # For doc_id + paragraph_id combinations
-        seen_texts = set()  # For normalized text content
-        seen_docs = set()  # Track documents to ensure diversity
+        # 5. Deduplicate results
+        seen_ids = set()
+        seen_paragraphs = set()
+        seen_texts = set()  # Also check for duplicate text content
         deduplicated = []
         
         for res in combined:
             doc = res["vector_result"]
-            
-            # Get all identifiers
             result_id = doc.get("id", "")
             doc_id = doc.get("doc_id", "")
             paragraph_id = doc.get("paragraph_id", "")
             text = doc.get("text", "").strip()
             
-            # Normalize text for comparison (remove extra whitespace, lowercase for comparison)
-            text_normalized = " ".join(text.split()).lower() if text else ""
-            
-            # Check 1: Result ID (most reliable if present)
+            # Check 1: Result ID
+            if result_id and result_id in seen_ids:
+                continue
             if result_id:
-                if result_id in seen_ids:
-                    continue
                 seen_ids.add(result_id)
             
-            # Check 2: Document + Paragraph combination (very reliable)
+            # Check 2: Document + Paragraph combination
             if doc_id and paragraph_id:
                 para_key = f"{doc_id}||{paragraph_id}"
                 if para_key in seen_paragraphs:
                     continue
                 seen_paragraphs.add(para_key)
             
-            # Check 3: Exact text match (catches duplicates even if IDs differ)
-            # Use a hash of first 100 chars + length for faster comparison
-            if text_normalized and len(text_normalized) > 5:
-                # Create a text signature: first 100 chars + total length
-                text_sig = f"{text_normalized[:100]}_{len(text_normalized)}"
-                if text_sig in seen_texts:
-                    # Also check full text match for certainty
-                    if text_normalized in seen_texts:
-                        continue
+            # Check 3: Exact text match (normalized) - catch duplicates even if IDs differ
+            if text and len(text) > 10:  # Only check for substantial text
+                text_normalized = " ".join(text.split()).lower()
+                if text_normalized in seen_texts:
+                    continue
                 seen_texts.add(text_normalized)
-                seen_texts.add(text_sig)
-            
-            # Track document for diversity (optional - can be removed if you want same doc multiple times)
-            # This ensures we get results from different documents when possible
-            if doc_id:
-                seen_docs.add(doc_id)
             
             deduplicated.append(res)
         
-        # 6. Sort by total_score descending
-        combined_sorted = sorted(deduplicated, key=lambda x: x["total_score"], reverse=True)
+        # 6. Sort by final_score descending (as per test case requirements)
+        combined_sorted = sorted(deduplicated, key=lambda x: x["final_score"], reverse=True)
         
-        # 7. Apply diversity filter: Prefer results from different documents
-        # This ensures we get diverse perspectives when possible
-        final_results = []
-        seen_doc_ids = set()
+        # 7. Return top_k_final results
+        return combined_sorted[:self.top_k_final]
+    
+    def _find_shortest_hop(self, start_entity_id: str, end_entity_id: str, max_depth: int = 3) -> Optional[int]:
+        """
+        Find shortest hop distance between two entities using BFS.
+        Returns None if no path found within max_depth.
+        """
+        if start_entity_id == end_entity_id:
+            return 0
         
-        for res in combined_sorted:
-            if len(final_results) >= self.top_k_final:
-                break
+        if not self.graph_db_available or not self.graph_db:
+            return None
+        
+        try:
+            # BFS to find shortest path
+            visited = {start_entity_id}
+            queue = [(start_entity_id, 0)]
             
-            doc = res["vector_result"]
-            doc_id = doc.get("doc_id", "")
+            while queue:
+                current_id, hop = queue.pop(0)
+                
+                if hop >= max_depth:
+                    continue
+                
+                # Get neighbors
+                cypher = (
+                    f"MATCH (n {{id: '{current_id}'}})-[r]-(m) "
+                    "RETURN m.id AS neighbor_id"
+                )
+                neighbors = self.graph_db.run_query(cypher)
+                
+                for neighbor in neighbors:
+                    neighbor_id = neighbor.get("neighbor_id")
+                    if neighbor_id == end_entity_id:
+                        return hop + 1
+                    
+                    if neighbor_id and neighbor_id not in visited:
+                        visited.add(neighbor_id)
+                        queue.append((neighbor_id, hop + 1))
             
-            # If we already have a result from this document and we have multiple results,
-            # skip unless this result has a significantly higher score
-            if doc_id in seen_doc_ids and len(final_results) > 0:
-                # Only add if score is much better (at least 0.1 higher) than existing results
-                if final_results and res["total_score"] > final_results[-1]["total_score"] + 0.1:
-                    final_results.append(res)
-                    seen_doc_ids.add(doc_id)
-            else:
-                final_results.append(res)
-                if doc_id:
-                    seen_doc_ids.add(doc_id)
-        
-        return final_results[: self.top_k_final]
+            return None  # No path found
+        except Exception:
+            return None

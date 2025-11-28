@@ -1,6 +1,0 @@
-# John Doe
-San Francisco, CA
-Software Engineer
-## About
-
-Experienced software engineer with expertise in Python and JavaScript.

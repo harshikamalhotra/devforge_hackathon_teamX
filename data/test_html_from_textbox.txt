@@ -1,9 +1,0 @@
-# Main Title
-This is content in a div that should be extracted.
-## Section 1
-
-This is a test paragraph with some content.
-Another paragraph with more information about the topic.
-- First item
-- Second item
-- Third item

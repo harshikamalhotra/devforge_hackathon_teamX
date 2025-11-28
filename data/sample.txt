@@ -1,5 +1,0 @@
-Alice is a software engineer at DevForge. She works on AI and automation projects.
-
-Bob is the CTO of DevForge. He oversees all technology decisions and team management.
-
-The company, DevForge, is located in Bangalore and specializes in AI SaaS products.

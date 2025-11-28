@@ -1,4 +1,0 @@
-Senior Software Engineer at Tech Company
-San Francisco Bay Area
-Senior Software Engineer Tech Company Jan 2020 - Present Led development of microservices architecture. Implemented CI/CD pipelines. Mentored junior engineers.
-Led development of microservices architecture. Implemented CI/CD pipelines. Mentored junior engineers.

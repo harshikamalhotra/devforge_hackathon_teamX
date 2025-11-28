@@ -92,14 +92,65 @@ class IngestionPipeline:
 
     # -------------------- Internal Methods --------------------
     def _split_into_paragraphs(self, raw_text: str) -> List[Dict[str, Any]]:
+        """
+        Split text into paragraphs. Uses multiple strategies to ensure full text is captured:
+        1. Split by double newlines (\n\n) - standard paragraph breaks
+        2. If that yields very few paragraphs, also try single newlines
+        3. Merge very short fragments with previous paragraph to avoid truncation
+        """
         paragraphs = []
-        for idx, block in enumerate(raw_text.split("\n\n")):
+        
+        # First, try splitting by double newlines (standard paragraph breaks)
+        blocks = raw_text.split("\n\n")
+        
+        # If we get very few blocks and text is long, also try single newlines
+        if len(blocks) < 3 and len(raw_text) > 500:
+            # Try splitting by single newlines and then grouping
+            lines = raw_text.split("\n")
+            blocks = []
+            current_block = []
+            for line in lines:
+                line = line.strip()
+                if line:
+                    current_block.append(line)
+                else:
+                    if current_block:
+                        blocks.append(" ".join(current_block))
+                        current_block = []
+            if current_block:
+                blocks.append(" ".join(current_block))
+        
+        # Process blocks and merge very short ones to avoid truncation
+        idx = 0
+        for block in blocks:
             block = block.strip()
-            if block:
+            if not block:
+                continue
+            
+            # If block is very short (< 50 chars) and we have a previous paragraph, merge it
+            if len(block) < 50 and paragraphs:
+                # Merge with previous paragraph to avoid truncation
+                paragraphs[-1]["text"] += " " + block
+            else:
+                # Normalize whitespace but preserve full content
+                # Replace multiple spaces with single space, but keep newlines within paragraph
+                normalized = " ".join(block.split())
+                if normalized:  # Only add if not empty after normalization
+                    paragraphs.append({
+                        "id": f"p{idx+1}",
+                        "text": normalized
+                    })
+                    idx += 1
+        
+        # If we still have no paragraphs but have text, create one paragraph with all text
+        if not paragraphs and raw_text.strip():
+            normalized = " ".join(raw_text.split())
+            if normalized:
                 paragraphs.append({
-                    "id": f"p{idx+1}",
-                    "text": block
+                    "id": "p1",
+                    "text": normalized
                 })
+        
         return paragraphs
 
     def _extract_entities_simple(self, paragraphs: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
