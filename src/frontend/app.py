@@ -7,6 +7,16 @@ sys.path.append(str(ROOT_DIR))
 from src.crud.crud_operations import CRUDOperations
 from src.hybrid_query.hybrid_retriever import HybridRetriever
 from src.utils.config import DATA_DIR
+# Import vector DB config with fallback for Streamlit caching issues
+try:
+    from src.utils.config import VECTOR_DB_TYPE, VECTOR_DB_DIR
+except ImportError:
+    # Fallback if config hasn't been reloaded
+    import importlib
+    import src.utils.config as config_module
+    importlib.reload(config_module)
+    VECTOR_DB_TYPE = getattr(config_module, 'VECTOR_DB_TYPE', 'local')
+    VECTOR_DB_DIR = getattr(config_module, 'VECTOR_DB_DIR', 'vector_db_store')
 from src.ingestion.ingest_pipeline import IngestionPipeline
 from src.data_processor.unstructured_processor import UnstructuredDataProcessor
 from src.graph_db.graph_loader import GraphLoader
@@ -32,6 +42,31 @@ crud, retriever = init_services()
 
 # GraphLoader doesn't need caching - create fresh instance each time
 # This ensures we get the latest version with all methods
+
+# Helper function to get vector DB info
+def get_vector_db_info():
+    """Get information about the active vector DB backend."""
+    db_type = VECTOR_DB_TYPE
+    db_dir = VECTOR_DB_DIR
+    
+    if db_type == "chromadb":
+        storage_info = f"ChromaDB collection in `{db_dir}/`"
+        db_name = "ChromaDB"
+    else:
+        storage_info = f"`{db_dir}/vectors.npy` and `{db_dir}/metadata.json`"
+        db_name = "LocalVectorDB (Pure Python)"
+    
+    return db_name, storage_info, db_type
+
+# Display vector DB backend info in sidebar
+with st.sidebar:
+    st.markdown("### 🔧 System Configuration")
+    db_name, storage_info, db_type = get_vector_db_info()
+    st.info(f"**Vector DB:** {db_name}")
+    if db_type == "chromadb":
+        st.success("✨ Using ChromaDB backend")
+    else:
+        st.info("📦 Using LocalVectorDB (Pure Python)")
 
 # Add button to clear cache and reload (for development)
 if st.sidebar.button("🔄 Reload Services (Clear Cache)"):
@@ -118,8 +153,9 @@ if uploaded_file:
             # Note: This is a workaround - in production, use a proper cache invalidation
             retriever.vector_db = crud.vector_db
             
-            # Show where data is stored
-            st.info(f"💾 Data stored in: `vector_db_store/vectors.npy` and `vector_db_store/metadata.json`")
+            # Show where data is stored (dynamic based on vector DB type)
+            _, storage_info, _ = get_vector_db_info()
+            st.info(f"💾 Data stored in: {storage_info}")
         except Exception as e:
             st.error(f"❌ Error: {e}")
             import traceback
@@ -245,7 +281,9 @@ if st.button("🔄 Convert & Process", type="primary"):
                             # Force retriever to reload vector DB
                             retriever.vector_db = crud.vector_db
                             
-                            st.info(f"💾 Data stored in: `vector_db_store/vectors.npy` and `vector_db_store/metadata.json`")
+                            # Show where data is stored (dynamic based on vector DB type)
+                            _, storage_info, _ = get_vector_db_info()
+                            st.info(f"💾 Data stored in: {storage_info}")
                         except Exception as e:
                             st.error(f"❌ Error during indexing: {e}")
                             import traceback

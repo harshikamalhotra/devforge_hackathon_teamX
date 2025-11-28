@@ -18,6 +18,10 @@ DATA_DIR.mkdir(exist_ok=True)
 VECTOR_DB_PATH = PROJECT_ROOT / "vector_db"
 VECTOR_DB_PATH.mkdir(exist_ok=True)
 
+# Vector DB type: "local" (pure Python) or "chromadb"
+VECTOR_DB_TYPE = "chromadb"  # Using ChromaDB as the default vector database
+VECTOR_DB_DIR = "vector_db_store"  # Directory for vector DB storage
+
 # -------------------- GRAPH DB CONFIG --------------------
 # Memgraph / Graph DB connection settings using gqlalchemy
 GRAPH_DB_HOST = "127.0.0.1"

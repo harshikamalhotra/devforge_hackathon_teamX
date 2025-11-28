@@ -12,7 +12,7 @@ Based on GraphRAG / HybridRAG architecture and test case requirements:
 import re
 from typing import List, Dict, Any, Tuple, Optional
 from src.embedding.embedder import Embedder
-from src.vector_db.qdrant_client import LocalVectorDB  # or your custom client
+from src.vector_db import get_vector_db  # Factory function for configurable vector DB
 from src.graph_db.memgraph_client import MemgraphClient     # using gqlalchemy or other client
 from src.utils.config import EMBEDDING_MODEL_NAME
 
@@ -25,7 +25,7 @@ class HybridRetriever:
         graph_weight: float = 0.4
     ):
         self.embedder = Embedder(model_name=EMBEDDING_MODEL_NAME)
-        self.vector_db = LocalVectorDB()
+        self.vector_db = get_vector_db()  # Get configured vector DB (local or chromadb)
         
         # Try to connect to graph DB, but don't fail if it's not available
         try:

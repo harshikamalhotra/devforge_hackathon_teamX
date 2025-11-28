@@ -6,7 +6,7 @@ Integrates ingestion, embedding, vector DB, and graph DB
 
 from src.ingestion.ingest_pipeline import IngestionPipeline
 from src.embedding.embedder import Embedder
-from src.vector_db.qdrant_client import LocalVectorDB     # your pure Python vector DB
+from src.vector_db import get_vector_db  # Factory function for configurable vector DB
 from src.graph_db.memgraph_client import MemgraphClient
 from src.utils.config import SUPPORTED_FILE_TYPES
 
@@ -14,7 +14,7 @@ class CRUDOperations:
     def __init__(self):
         self.ingestion_pipeline = IngestionPipeline()
         self.embedder = Embedder()
-        self.vector_db = LocalVectorDB()  # implement store, retrieve, update, delete
+        self.vector_db = get_vector_db()  # Get configured vector DB (local or chromadb)
         
         # Try to connect to graph DB, but don't fail if it's not available
         try:
